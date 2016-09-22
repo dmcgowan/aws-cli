@@ -64,6 +64,9 @@ CtrlCResult = _create_new_result_cls('CtrlCResult', base_cls=ErrorResult)
 CommandResult = namedtuple(
     'CommandResult', ['num_tasks_failed', 'num_tasks_warned'])
 
+FinalTotalSubmissionsResult = namedtuple(
+    'FinalTotalSubmissionsResult', ['total_submissions'])
+
 
 class BaseResultSubscriber(OnDoneFilteredSubscriber):
     TRANSFER_TYPE = None
@@ -195,6 +198,7 @@ class ResultRecorder(BaseResultHandler):
         self.errors = 0
         self.expected_bytes_transferred = 0
         self.expected_files_transferred = 0
+        self.final_expected_files_transferred = None
 
         self._ongoing_progress = defaultdict(int)
         self._ongoing_total_sizes = {}
@@ -205,8 +209,15 @@ class ResultRecorder(BaseResultHandler):
             SuccessResult: self._record_success_result,
             FailureResult: self._record_failure_result,
             WarningResult: self._record_warning_result,
-            ErrorResult: self._record_error_result
+            ErrorResult: self._record_error_result,
+            FinalTotalSubmissionsResult: self._record_final_expected_files,
         }
+
+    def expected_totals_are_final(self):
+        return (
+            self.final_expected_files_transferred ==
+            self.expected_files_transferred
+        )
 
     def __call__(self, result):
         """Record the result of an individual Result object"""
@@ -298,9 +309,14 @@ class ResultRecorder(BaseResultHandler):
     def _record_error_result(self, **kwargs):
         self.errors += 1
 
+    def _record_final_expected_files(self, result, **kwargs):
+        self.final_expected_files_transferred = result.total_submissions
+
 
 class ResultPrinter(BaseResultHandler):
     _FILES_REMAINING = "{remaining_files} file(s) remaining"
+    _ESTIMATED_EXPECTED_TOTAL = "~{expected_total}"
+    _STILL_CALCULATING_TOTALS = " (calculating...)"
     BYTE_PROGRESS_FORMAT = (
         'Completed {bytes_completed}/{expected_bytes_completed} with '
         + _FILES_REMAINING
@@ -422,9 +438,9 @@ class ResultPrinter(BaseResultHandler):
 
     def _print_progress(self, **kwargs):
         # Get all of the statistics in the correct form.
-        remaining_files = str(
-            self._result_recorder.expected_files_transferred -
-            self._result_recorder.files_transferred
+        remaining_files = self._get_expected_total(
+            str(self._result_recorder.expected_files_transferred -
+                self._result_recorder.files_transferred)
         )
 
         # Create the display statement.
@@ -433,8 +449,9 @@ class ResultPrinter(BaseResultHandler):
                 self._result_recorder.bytes_transferred +
                 self._result_recorder.bytes_failed_to_transfer
             )
-            expected_bytes_completed = human_readable_size(
-                self._result_recorder.expected_bytes_transferred)
+            expected_bytes_completed = self._get_expected_total(
+                human_readable_size(
+                    self._result_recorder.expected_bytes_transferred))
 
             progress_statement = self.BYTE_PROGRESS_FORMAT.format(
                 bytes_completed=bytes_completed,
@@ -449,6 +466,9 @@ class ResultPrinter(BaseResultHandler):
                 remaining_files=remaining_files
             )
 
+        if not self._result_recorder.expected_totals_are_final():
+            progress_statement += self._STILL_CALCULATING_TOTALS
+
         # Make sure that it overrides any previous progress bar.
         progress_statement = self._adjust_statement_padding(
                 progress_statement, ending_char='\r')
@@ -459,6 +479,12 @@ class ResultPrinter(BaseResultHandler):
 
         # Print the progress out.
         self._print_to_out_file(progress_statement)
+
+    def _get_expected_total(self, expected_total):
+        if not self._result_recorder.expected_totals_are_final():
+            return self._ESTIMATED_EXPECTED_TOTAL.format(
+                expected_total=expected_total)
+        return expected_total
 
     def _adjust_statement_padding(self, print_statement, ending_char='\n'):
         print_statement = print_statement.ljust(self._progress_length, ' ')
@@ -574,6 +600,9 @@ class CommandResultRecorder(object):
             self._result_recorder.files_failed + self._result_recorder.errors,
             self._result_recorder.files_warned
         )
+
+    def notify_total_submissions(self, total):
+        self.result_queue.put(FinalTotalSubmissionsResult(total))
 
     def __enter__(self):
         self.start()
